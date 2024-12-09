@@ -13,6 +13,7 @@ module.exports = withNativeFederation({
   },
 
   skip: [
+    '@angular/compiler',
     'rxjs/ajax',
     'rxjs/fetch',
     'rxjs/testing',

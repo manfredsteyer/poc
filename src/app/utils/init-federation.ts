@@ -4,20 +4,38 @@ import {
   Imports,
   mergeImportMaps,
   Scopes,
+  SharedInfo,
 } from '@angular-architects/native-federation';
-import { addRemote, appendImportMap, getDirectory, getExternalUrl, joinPaths, setExternalUrl } from './tools';
+import {
+  addRemote,
+  appendImportMap,
+  getDirectory,
+  getExternalUrl,
+  joinPaths,
+  setExternalUrl,
+} from './tools';
+
+export type InitFederationOptions = {
+  cdnPattern?: string;
+};
 
 export async function initFederation(
-  remotesOrManifestUrl: Record<string, string> | string = {}
+  remotesOrManifestUrl: Record<string, string> | string = {},
+  options?: InitFederationOptions
 ): Promise<ImportMap> {
+  options = options ?? {};
+
   const remotes =
     typeof remotesOrManifestUrl === 'string'
       ? await loadManifest(remotesOrManifestUrl)
       : remotesOrManifestUrl;
 
   const hostInfo = await loadFederationInfo('./remoteEntry.json');
-  const hostImportMap = await processHostInfo(hostInfo);
-  const remotesImportMap = await processRemoteInfos(remotes);
+  const hostImportMap = await processHostInfo(hostInfo, './', options);
+  const remotesImportMap = await processRemoteInfos(remotes, {
+    ...options,
+    throwIfRemoteNotFound: false,
+  });
 
   const importMap = mergeImportMaps(hostImportMap, remotesImportMap);
   appendImportMap(importMap);
@@ -31,13 +49,18 @@ async function loadManifest(remotes: string): Promise<Record<string, string>> {
 
 export async function processRemoteInfos(
   remotes: Record<string, string>,
-  options: { throwIfRemoteNotFound: boolean } = { throwIfRemoteNotFound: false }
+  options: InitFederationOptions & { throwIfRemoteNotFound: boolean } = {
+    throwIfRemoteNotFound: false,
+  }
 ): Promise<ImportMap> {
   const processRemoteInfoPromises = Object.keys(remotes).map(
     async (remoteName) => {
       try {
         const url = remotes[remoteName];
-        return await processRemoteInfo(url, remoteName);
+        return await processRemoteInfo(url, {
+          ...options,
+          remoteName,
+        });
       } catch (e) {
         const error = `Error loading remote entry for ${remoteName} from file ${remotes[remoteName]}`;
 
@@ -64,16 +87,21 @@ export async function processRemoteInfos(
 
 export async function processRemoteInfo(
   federationInfoUrl: string,
-  remoteName?: string
+  options?: InitFederationOptions & {
+    remoteName?: string;
+  }
 ): Promise<ImportMap> {
   const baseUrl = getDirectory(federationInfoUrl);
   const remoteInfo = await loadFederationInfo(federationInfoUrl);
 
-  if (!remoteName) {
-    remoteName = remoteInfo.name;
-  }
+  const remoteName = options?.remoteName ?? remoteInfo.name;
 
-  const importMap = createRemoteImportMap(remoteInfo, remoteName, baseUrl);
+  const importMap = createRemoteImportMap(
+    remoteInfo,
+    remoteName,
+    baseUrl,
+    options
+  );
   addRemote(remoteName, { ...remoteInfo, baseUrl });
 
   return importMap;
@@ -82,10 +110,11 @@ export async function processRemoteInfo(
 function createRemoteImportMap(
   remoteInfo: FederationInfo,
   remoteName: string,
-  baseUrl: string
+  baseUrl: string,
+  options?: InitFederationOptions
 ): ImportMap {
   const imports = processExposed(remoteInfo, remoteName, baseUrl);
-  const scopes = processRemoteImports(remoteInfo, baseUrl);
+  const scopes = processRemoteImports(remoteInfo, baseUrl, options);
   return { imports, scopes };
 }
 
@@ -96,15 +125,23 @@ async function loadFederationInfo(url: string): Promise<FederationInfo> {
 
 function processRemoteImports(
   remoteInfo: FederationInfo,
-  baseUrl: string
+  baseUrl: string,
+  options?: InitFederationOptions
 ): Scopes {
   const scopes: Scopes = {};
   const scopedImports: Imports = {};
 
   for (const shared of remoteInfo.shared) {
-    const outFileName =
-      getExternalUrl(shared) ?? joinPaths(baseUrl, shared.outFileName);
-    setExternalUrl(shared, outFileName);
+    let outFileName = '';
+
+    if (options?.cdnPattern) {
+      outFileName = applyCdnPattern(options.cdnPattern, shared)
+    } else {
+      outFileName =
+        getExternalUrl(shared) ?? joinPaths(baseUrl, shared.outFileName);
+      setExternalUrl(shared, outFileName);
+    }
+
     scopedImports[shared.packageName] = outFileName;
   }
 
@@ -130,13 +167,16 @@ function processExposed(
 
 export async function processHostInfo(
   hostInfo: FederationInfo,
-  relBundlesPath = './'
+  relBundlesPath = './',
+  options: InitFederationOptions
 ): Promise<ImportMap> {
-
   const imports = hostInfo.shared.reduce(
     (acc, cur) => ({
       ...acc,
-      [cur.packageName]: relBundlesPath + cur.outFileName,
+      [cur.packageName]:
+        options.cdnPattern && cur.version
+          ? applyCdnPattern(options.cdnPattern, cur)
+          : relBundlesPath + cur.outFileName,
     }),
     {}
   ) as Imports;
@@ -145,4 +185,10 @@ export async function processHostInfo(
     setExternalUrl(shared, relBundlesPath + shared.outFileName);
   }
   return { imports, scopes: {} };
+}
+
+function applyCdnPattern(cdnPattern: string, shared: SharedInfo) {
+  return cdnPattern
+    .replace('{package}', shared.packageName)
+    .replace('{version}', shared.version ?? '');
 }
